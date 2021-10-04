@@ -1,0 +1,308 @@
+
+Public Type CustomItem
+    ItemName As String
+    numLayers As Long
+    numPallets As Integer
+    behaviour As String 'Will be either: CANS, LCBO CANS, BOTTLES, PMU, 30L KEGS, or 50/58L KEGS
+End Type
+
+Public Type Custom_WhseLoad
+    numItems As Integer
+    itemList(20) As CustomItem
+End Type
+
+Sub Custom_Build()
+
+    Module3.resetLoadSheets
+
+    If rangeIsEmpty("A2", "C27") Then 'No items in list; break
+        ret = MsgBox("ERROR: No items are in the list (columns A, B, C)." & vbNewLine & _
+        "Please fill this list with your custom items and click Build again.", vbCritical)
+        Exit Sub
+    End If
+    
+    Dim customLoad As Custom_WhseLoad
+    customLoad.numItems = 0
+        
+    ListRow = 2
+
+    ActiveWorkbook.Sheets("Custom Load").Select
+
+FillLoop:
+    Do While ListRow <= 27
+    
+        ' If all data is given for this item, add to list
+        If (Not IsEmpty(Range("B" & ListRow)) Or Not IsEmpty(Range("C" & ListRow))) _
+        And Not IsEmpty(Range("D" & ListRow)) Then
+    
+            Dim newItem As CustomItem ' Create new labelled item
+    
+            newItem.ItemName = Range("A" & ListRow).Value
+            newItem.numPallets = Range("B" & ListRow).Value
+            newItem.numLayers = Range("C" & ListRow).Value
+            newItem.behaviour = Range("D" & ListRow).Value
+            
+            customLoad.numItems = customLoad.numItems + 1
+            
+            customLoad.itemList(customLoad.numItems) = newItem ' Add the new item to list
+            
+        ElseIf rangeIsEmpty("B" & ListRow, "D" & ListRow) Then ' Empty row -> go to next row and try
+            ' May need behaviour here in future
+        Else
+            ret = MsgBox("Row " & ListRow & " is missing at least one piece of info! Please complete this row and try again.", vbCritical)
+        End If
+        
+        ListRow = ListRow + 1
+        
+    
+    Loop
+    
+    
+    Dim generalizedCustomLoad As WhseLoad
+    Dim chosenSheet As String
+    
+    On Error GoTo Err1
+    
+    succ = generalizeLoad(customLoad, generalizedCustomLoad)
+    
+    chosenSheet = Module4.pickSheetToBuildOn(generalizedCustomLoad)
+    
+    If Not succ Then
+Err1:        Stop
+    End If
+    
+    t = placeAllItems(generalizedCustomLoad, customLoad, chosenSheet)
+    
+    
+    Module3.finalizeSheet
+    
+
+End Sub
+
+Function rangeIsEmpty(fromCell, toCell)
+
+    If WorksheetFunction.CountA(Range(fromCell & ":" & toCell)) = 0 Then
+        rangeIsEmpty = True
+    Else
+        rangeIsEmpty = False
+    End If
+End Function
+
+
+Function generalizeLoad(ByRef customLoad As Custom_WhseLoad, ByRef generalizedCustomLoad As WhseLoad) As Boolean
+
+    i = 1
+
+generalizeLoop:
+    Do While i <= customLoad.numItems
+    
+        itemPallets = 0
+        itemLayers = 0
+        
+        If IsNumeric(Range("B" & i + 1).Value) Then
+            itemPallets = Range("B" & i + 1).Value
+        End If
+        
+        If IsNumeric(Range("C" & i + 1).Value) Then
+            itemLayers = Range("C" & i + 1).Value
+        End If
+        
+        ' Divide up layers to get full_pallet count for the item
+        If customLoad.itemList(i).behaviour = "30L KEGS" Then
+            
+            itemPallets = itemPallets + WorksheetFunction.RoundDown(itemLayers / 32, 0)
+            itemLayers = itemLayers Mod 32
+                
+        ElseIf customLoad.itemList(i).behaviour = "50/58L KEGS" Then
+        
+            itemPallets = itemPallets + WorksheetFunction.RoundDown(itemLayers / 16, 0)
+            itemLayers = itemLayers Mod 16
+            
+        ElseIf customLoad.itemList(i).behaviour = "LCBO CANS" Then
+            
+            itemPallets = itemPallets + WorksheetFunction.RoundDown(itemLayers / 5, 0)
+            itemLayers = itemLayers Mod 5
+        
+        ElseIf itemLayers >= 0 Then
+        
+            itemPallets = itemPallets + WorksheetFunction.RoundDown(itemLayers / 7, 0)
+            itemLayers = itemLayers Mod 7
+            
+            If itemLayers > 0 And customLoad.itemList(i).behaviour <> "PMU" Then
+                t = MsgBox("The item on line " & i + 1 & " is type '" & customLoad.itemList(i).behaviour & "' but it has extra layers!" & vbNewLine & _
+                "These layers will be placed as PMU.", vbOKOnly + vbCritical)
+            End If
+    
+        End If
+        
+        ' Fill the WhseLoad struct (generalizedCustomLoad) with an easier breakdown of types of items
+        If customLoad.itemList(i).behaviour = "CANS" Then
+            generalizedCustomLoad.numCanSkids = generalizedCustomLoad.numCanSkids + itemPallets
+            generalizedCustomLoad.numPMULayers = generalizedCustomLoad.numPMULayers + itemLayers
+            
+        ElseIf customLoad.itemList(i).behaviour = "LCBO CANS" Then
+            generalizedCustomLoad.numLCBOCanSkids = generalizedCustomLoad.numLCBOCanSkids + itemPallets
+            generalizedCustomLoad.numPMULayers = generalizedCustomLoad.numPMULayers + itemLayers
+            
+        ElseIf customLoad.itemList(i).behaviour = "BOTTLES" Then
+            generalizedCustomLoad.numBottleSkids = generalizedCustomLoad.numBottleSkids + itemPallets
+            generalizedCustomLoad.numPMULayers = generalizedCustomLoad.numPMULayers + itemLayers
+            
+        ElseIf customLoad.itemList(i).behaviour = "PMU" Then
+            generalizedCustomLoad.numPMULayers = generalizedCustomLoad.numPMULayers + itemLayers + (itemPallets * 7)
+            
+        ElseIf customLoad.itemList(i).behaviour = "30L KEGS" Then
+            generalizedCustomLoad.num30LKegs = generalizedCustomLoad.num30LKegs + (itemPallets * 32) + itemLayers
+        
+        ElseIf customLoad.itemList(i).behaviour = "50/58L KEGS" Then
+            generalizedCustomLoad.num50L_58LKegs = generalizedCustomLoad.num50L_58LKegs + (itemPallets * 16) + itemLayers
+        
+        Else
+            t = MsgBox("Oops! An error occured because of line " & i + 1 & "." & vbNewLine & _
+            "Please make sure this line is filled out before trying again.", vbCritical)
+            
+            generalizeLoad = False
+            Exit Function
+            
+        End If
+        
+        itemPallets = 0
+        itemLayers = 0
+        
+        i = i + 1
+    Loop
+    
+    generalizeLoad = True
+    
+End Function
+
+
+Function placeAllItems(ByRef generalizedCustomLoad As WhseLoad, ByRef customLoad As Custom_WhseLoad, chosenSheet As String)
+
+    Dim placementOrder(10) As String
+
+    t = getPlacementOrder(placementOrder, generalizedCustomLoad, chosenSheet)
+    
+    Dim fullsPlaced As Boolean
+    fullsPlaced = False
+    
+    Dim partialsPlaced As Boolean
+    partialsPlaced = False
+    
+    orderIndex = 1
+    
+    Worksheets(chosenSheet).Select
+    
+    Do While placementOrder(orderIndex) <> "" ' MIGHT BE UNDEFINED!
+    
+        itemListIndex = 1
+        
+        Do While itemListIndex <= customLoad.numItems
+        
+            Dim curItem As CustomItem
+            curItem = customLoad.itemList(itemListIndex)
+            
+            ' if this item in the list should be placed now (based on placement order)
+            If placementOrder(orderIndex) = curItem.behaviour Or curItem.behaviour = "CANS SINGLE" Then
+                successfulPlacement = placeItem(generalizedCustomLoad, curItem)
+            
+                If successfulPlacement <= 0 Then
+                    t = MsgBox("ERROR: There was an issue placing item: " & curItem.ItemName & _
+                    " from line " & itemListIndex + 1 & "." & vbNewLine & "Please check this line before trying again.", vbCritical)
+                End If
+            
+            ElseIf curItem.behaviour = "PMU" Or curItem.behaviour = "30L KEGS" Or curItem.behaviour = "50/58L KEGS" Then
+            
+                If placementOrder(orderIndex) = "FULL" And Not fullsPlaced Then
+                'Place full PMU skids and Keg skids
+                
+                successfulPlacement = Module3.placePMUandKegs(generalizedCustomLoad.numPMULayers, _
+                generalizedCustomLoad.num30LKegs, generalizedCustomLoad.num50L_58LKegs)
+                
+                fullsPlaced = True
+                
+                ElseIf placementOrder(orderIndex) = "PARTIAL" And Not partialsPlaced Then
+                'Stack & place PMU and keg partial skids
+                
+                successfulPlacement = Module3.placePMUandKegsPartials(generalizedCustomLoad.numPMULayers, _
+                generalizedCustomLoad.num30LKegs, generalizedCustomLoad.num50L_58LKegs)
+                
+                partialsPlaced = True
+                
+                End If
+                
+            End If
+        
+            itemListIndex = itemListIndex + 1
+        Loop
+    
+        orderIndex = orderIndex + 1
+    Loop
+    
+End Function
+
+Function getPlacementOrder(ByRef placementOrder, ByRef generalizedCustomLoad As WhseLoad, ByVal chosenSheet As String)
+    
+    numSingleSpots = Module3.getNumSinglesOnLoadSheet(chosenSheet)
+    
+    If numSingleSpots >= 4 Then
+        placementOrder(1) = "BOTTLES"
+        placementOrder(2) = "CANS"
+        placementOrder(3) = "FULL" ' FULL PMU AND KEGS
+        placementOrder(4) = "LCBO CANS"
+        placementOrder(5) = "PARTIAL" ' PARTIAL PMU AND KEGS
+
+    ElseIf numSingleSpots >= 1 And generalizedCustomLoad.numLCBOCanSkids > 0 _
+    And generalizedCustomLoad.numCanSkids >= (2 * numSingleSpots) + 1 Then
+    
+        placementOrder(1) = "BOTTLES"
+        placementOrder(2) = "CANS SINGLE" ' ONLY ENOUGH TO FILL SINGLES AREA (SEE MOD3)
+        placementOrder(3) = "LCBO CANS"
+        placementOrder(4) = "CANS" ' REMAINDER OF CANS
+        placementOrder(5) = "FULL" ' FULL PMU AND KEGS
+        placementOrder(6) = "PARTIAL" ' PARTIAL PMU AND KEGS
+    
+    ElseIf numSingleSpots = 0 And generalizedCustomLoad.numLCBOCanSkids >= 12 Then
+    
+        placementOrder(1) = "LCBO CANS"
+        placementOrder(2) = "BOTTLES" ' ONLY ENOUGH TO FILL SINGLES AREA (SEE MOD3)
+        placementOrder(3) = "CANS"
+        placementOrder(4) = "FULL" ' FULL PMU AND KEGS
+        placementOrder(5) = "PARTIAL" ' PARTIAL PMU AND KEGS
+    
+    Else
+        placementOrder(1) = "BOTTLES"
+        placementOrder(2) = "CANS"
+        placementOrder(3) = "FULL" ' FULL PMU AND KEGS
+        placementOrder(4) = "LCBO CANS"
+        placementOrder(5) = "PARTIAL" ' PARTIAL PMU AND KEGS
+    End If
+    
+End Function
+
+
+' NEXT UP - Edit this function to assure it can place at least CANS, LCBO, BOTTLES
+
+Function placeItem(ByRef generalizedCustomLoad As WhseLoad, ByRef itemToPlace As CustomItem)
+    If itemToPlace.numPallets <= 0 Then
+        placeItem = 1
+        Exit Function
+    End If
+    
+
+    If itemToPlace.ItemName = "" Then
+        itemToPlace.ItemName = itemToPlace.behaviour
+    End If
+    
+    itemToPlace.numPallets = itemToPlace.numPallets - fillSingles(itemToPlace.numPallets, itemToPlace.ItemName)
+    
+    If itemToPlace.behaviour = "CANS SINGLE" Then
+        Exit Function ' exit the function before doing non-singles (they are to be placed later)
+    End If
+    
+    success = fillNonSingles(itemToPlace.numPallets, itemToPlace.ItemName)
+    
+    placeItem = success
+    
+End Function
+

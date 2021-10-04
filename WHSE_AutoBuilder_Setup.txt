@@ -1,0 +1,167 @@
+' by Matthew Ruetz
+' UTD: 10/09/2020
+
+Function getTotalSkidCount(ByRef curLoad As WhseLoad, ByRef leftoverPartialLayers As Integer)
+
+    Dim totalSkids
+    totalSkids = 0
+    
+    Dim partialKegs_30L
+    Dim partialKegs_50L_58L
+    Dim partialPMULayers
+    
+    partialKegs_30L = curLoad.num30LKegs Mod 32
+    partialKegs_50L_58L = curLoad.num50L_58LKegs Mod 16
+    partialPMULayers = curLoad.numPMULayers Mod 7
+    
+    Dim stackWith50L_58L_Height
+    
+    totalSkids = curLoad.numLCBOCanSkids + curLoad.numBottleSkids + curLoad.numCanSkids
+    
+    
+    If curLoad.num30LKegs > 0 Then
+        totalSkids = totalSkids + Application.WorksheetFunction.RoundDown(curLoad.num30LKegs / 32, 0)
+        stackWith30L_Height = Application.WorksheetFunction.RoundDown((partialKegs_30L / 4) + partialPMULayers, 0)
+    End If
+    
+    If curLoad.num50L_58LKegs > 0 Then
+        totalSkids = totalSkids + Application.WorksheetFunction.RoundDown(curLoad.num50L_58LKegs / 16, 0)
+        stackWith50L_58L_Height = Application.WorksheetFunction.RoundDown((partialKegs_50L_58L / 2) + partialPMULayers, 0)
+    End If
+    
+    If curLoad.numPMULayers > 0 Then
+        'Adds FULL PMU skids to the total skid count
+        totalSkids = totalSkids + Application.WorksheetFunction.RoundDown(curLoad.numPMULayers / 7, 0)
+    End If
+    
+    ' add potential stacks / partials as more skid(s)
+    If Module3.isLegalKegPMUStack(partialPMULayers, partialKegs_30L, "30") = True Then
+
+        totalSkids = totalSkids + 1
+        
+        If partialKegs_50L_58L > 8 Then
+            totalSkids = totalSkids + 1
+            leftoverPartialLayers = 0
+        Else
+            ' approximate the amt of layers these 30L kegs take
+            leftoverPartialLayers = Application.WorksheetFunction.RoundDown(partialKegs_50L_58L / 2, 0)
+        End If
+            
+    ElseIf Module3.isLegalKegPMUStack(partialPMULayers, partialKegs_30L, "30") = False _
+    And Module3.isLegalKegPMUStack(partialPMULayers, partialKegs_50L_58L, "50/58") = True Then
+    
+        totalSkids = totalSkids + 1
+            
+        If partialKegs_30L > 16 Then
+            totalSkids = totalSkids + 1
+            leftoverPartialLayers = 0
+        Else
+            ' approximate the amt of layers these 30L kegs take
+            leftoverPartialLayers = Application.WorksheetFunction.RoundDown(partialKegs_30L / 4, 0)
+        End If
+
+    Else ' both stacks are impossible..
+        ' add a "full" skid for each of the keg partials
+        If partialKegs_30L > 0 Then
+            totalSkids = totalSkids + 1
+        End If
+        If partialKegs_50L_58L > 0 Then
+            totalSkids = totalSkids + 1
+        End If
+        
+        ' and PMU partial is leftover
+        leftoverPartialLayers = partialPMULayers
+    End If
+    
+    If leftoverPartialLayers > 4 Then
+        totalSkids = totalSkids + 1
+        leftoverPartialLayers = 0
+    End If
+    
+    getTotalSkidCount = totalSkids
+
+End Function
+
+
+Function pickSheetToBuildOn(ByRef curLoad As WhseLoad) As String
+' NEED INPUT FROM ED HERE!
+    ' This is a mess of specific cases. Not sure if there's a more sensible method..
+
+    Dim leftoverPartialLayers As Integer
+
+    totalSkids = getTotalSkidCount(curLoad, leftoverPartialLayers)
+    
+    If (curLoad.numLCBOCanSkids >= 12) Or (totalSkids > 28 And totalSkids < 30) Then ' maybe consider numBottles here too?
+        If curLoad.numLCBOCanSkids < 12 And totalSkids <= 28 Then
+            pickSheetToBuildOn = "27 1 SINGLE"
+        Else
+            pickSheetToBuildOn = "30 No Singles"
+        End If
+        
+    ElseIf totalSkids <= 6 Then
+        If totalSkids Mod 2 = 1 Then
+            pickSheetToBuildOn = "27 1 SINGLE"
+        Else
+            pickSheetToBuildOn = "30 NO SINGLES"
+        End If
+    ElseIf totalSkids <= 10 And totalSkids >= 8 Then
+        If totalSkids Mod 2 = 1 Then
+            pickSheetToBuildOn = "25 3 SINGLES"
+        Else
+            pickSheetToBuildOn = "26 2 SINGLE"
+        End If
+    ElseIf totalSkids <= 24 And (totalSkids - curLoad.numLCBOCanSkids) > 13 _
+    And totalSkids Mod 2 <> 0 And leftoverPartialLayers <= 4 Then
+    
+        pickSheetToBuildOn = "23 5 SINGLE"
+        
+    ElseIf ((totalSkids = 24 And leftoverPartialLayers > 4) Or totalSkids = 25) _
+    Or ((totalSkids - curLoad.numLCBOCanSkids) <= 13 And totalSkids Mod 2 <> 0 And leftoverPartialLayers <= 4) Then
+    
+        pickSheetToBuildOn = "25 3 SINGLE"
+        
+    ElseIf totalSkids <= 24 Or (totalSkids <= 26 And leftoverPartialLayers = 0) Then
+        pickSheetToBuildOn = "24 4 SINGLE"
+        
+    ElseIf totalSkids <= 26 Or (totalSkids = 27 And leftoverPartialLayers > 0 And leftoverPartialLayers <= 4) Then
+        pickSheetToBuildOn = "26 2 SINGLE"
+        
+    ElseIf totalSkids = 27 Or (totalSkids = 28 And leftoverPartialLayers <= 4) Then
+    
+        pickSheetToBuildOn = "27 1 SINGLE"
+        
+    ElseIf totalSkids <= 30 Then
+    
+        pickSheetToBuildOn = "30 No Singles"
+    Else
+    
+        resp = MsgBox("This load may be too heavy or may overflow the trailer." & vbNewLine & vbNewLine & _
+        "Are you sure you want to try building?", vbExclamation + vbYesNo, "Possible Overflow!")
+
+        If resp = vbYes Then
+            pickSheetToBuildOn = "30 No Singles"
+        Else
+            End
+        End If
+    End If
+    
+End Function
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

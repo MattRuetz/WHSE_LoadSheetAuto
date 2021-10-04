@@ -1,0 +1,127 @@
+Sub Mail_and_Reset_WHSE()
+
+    email_subject = getEmailSubject
+    
+    '--- Now set up draft and prep to mail ---
+    
+    'First fetch destination address(es) from Settings page
+    addrCellVal = Worksheets("DATA_REFERENCE").Range("B10").Value
+    
+    If addrCellVal = "" Or InStr(addrCellVal, "@") <= 0 Then
+        MsgBox ("The email address entered on the Settings page are invalid format!" & vbNewLine & "Please Fix and try again.")
+        End
+    End If
+    
+    
+    Dim wb1 As Workbook
+    Dim TempFilePath As String
+    Dim TempFileName As String
+    Dim FileExtStr As String
+    Dim OutApp As Object
+    Dim OutMail As Object
+
+    'With Application
+    '    .ScreenUpdating = False
+    '    .EnableEvents = False
+    'End With
+
+    Set wb1 = ActiveWorkbook
+
+    'Make a copy of the file/Open it/Mail it/Delete it
+    'If you want to change the file name then change only TempFileName
+    TempFilePath = Environ$("temp") & "\"
+    TempFileName = wb1.Name
+    FileExtStr = "." & LCase(Right(wb1.Name, Len(wb1.Name) - InStrRev(wb1.Name, ".", , 1)))
+
+    wb1.SaveCopyAs TempFilePath & TempFileName & FileExtStr
+
+    Set OutApp = CreateObject("Outlook.Application")
+    Set OutMail = OutApp.CreateItem(0)
+
+    On Error Resume Next
+    With OutMail
+        .to = addrCellVal
+        .CC = ""
+        .BCC = ""
+        .Subject = email_subject
+        .Body = ""
+        .Attachments.Add TempFilePath & TempFileName & FileExtStr
+        'You can add other files also like this
+        '.Attachments.Add ("C:\test.txt")
+        .Display
+    End With
+    On Error GoTo 0
+
+    'Delete the file
+    Kill TempFilePath & TempFileName & FileExtStr
+
+    Set OutMail = Nothing
+    Set OutApp = Nothing
+    
+    resetIfCustom
+    
+End Sub
+
+
+Function getEmailSubject() As String
+
+    splitCurrentlyShowingStr = Split(ActiveSheet.Range("Q4"), " ")
+    WhseNum = splitCurrentlyShowingStr(0)
+    
+    On Error GoTo badName
+    
+    If UBound(splitCurrentlyShowingStr) - LBound(splitCurrentlyShowingStr) + 1 > 1 Then
+        i = 0
+        Do While (splitCurrentlyShowingStr(i) = "")
+            i = i + 1
+        Loop
+        
+        WhseNum = splitCurrentlyShowingStr(i)
+        
+        Do While i < UBound(splitCurrentlyShowingStr) - LBound(splitCurrentlyShowingStr)
+            If InStr(splitCurrentlyShowingStr(i + 1), "(") = 0 Then
+                i = i + 1
+                WhseNum = WhseNum & " " & splitCurrentlyShowingStr(i)
+            Else
+                Exit Do
+            End If
+        Loop
+        
+    End If
+    
+    ' checks if Load Sheet has name entered, to be added to email subject line
+    If InStr(WhseNum, "[") <> 1 Then
+        getEmailSubject = "WHSE Load Sheet: " & WhseNum
+    Else
+    
+badName:
+
+        customNameSheetForm.Show
+        
+        If IsEmpty(ActiveSheet.Range("Q4")) Then
+
+            ret = MsgBox("No name has been given for this load. A default name will be used in the email subject line." & vbNewLine & vbNewLine & "Are you sure you wish to proceed?", vbExclamation + vbOKCancel)
+            
+            ' No name given, and user doesn't care...
+            If ret = vbOK Then
+                getEmailSubject = "WHSE Load Sheet: [No WHSE Number]"
+            Else
+                End
+            End If
+        Else
+            WhseNum = Range("Q4").Value
+            getEmailSubject = "WHSE Load Sheet: " & WhseNum
+        End If
+    End If
+
+End Function
+
+Function resetIfCustom()
+
+    If InStr(Range("Q5"), "[") = 1 Then ' In this case, the name IS CUSTOM --- Reset all
+        Module3.resetLoadSheets
+    End If
+
+End Function
+
+

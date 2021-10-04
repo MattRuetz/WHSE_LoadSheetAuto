@@ -1,0 +1,1239 @@
+' by Matthew Ruetz
+' UTD: 16/09/2020
+
+Public CALC_SHEETS_BOOK_NAME As String
+Public nextSheet As Integer
+Public LCBOCanCellLoc As String
+Public BottleCellLoc As String
+Public CanCellLoc As String
+Public PMUCellLoc As String
+Public Keg30LCellAddress As String
+Public Keg50L_58LCellAddress As String
+
+Public LOAD_SHEETS_BOOK_NAME As String ' = ActiveWorkbook.Name
+' "WhseLoadSheet_Auto.xlsm"
+
+Public BYPASS_UNEVEN_STACK_RESTRICTION As Boolean
+
+Public Type WhseLoad
+    whseID As String
+    numLCBOCanSkids As Integer
+    numBottleSkids As Integer
+    numCanSkids As Integer
+    numPMULayers As Integer
+    num30LKegs As Integer
+    num50L_58LKegs As Integer
+End Type
+
+' Activated by RESET button
+Sub startOver()
+    resetLoadSheets
+End Sub
+
+
+Sub BuildSheet_WHSE()
+
+    nextSheet = 1
+    
+    Dim nextSheetName As String
+    
+    Dim curLoad As WhseLoad
+    
+    Dim success As Integer
+    
+    LOAD_SHEETS_BOOK_NAME = ActiveWorkbook.Name
+    
+    Workbooks(LOAD_SHEETS_BOOK_NAME).Activate
+    
+    ' GET RELEVANT DATA FROM THE DATA_REFERENCE PAGE
+    CALC_SHEETS_BOOK_NAME = CStr(ActiveWorkbook.Sheets("DATA_REFERENCE").Range("B1").Value)
+    LCBOCanCellLoc = CStr(ActiveWorkbook.Sheets("DATA_REFERENCE").Range("B2").Value)
+    BottleCellLoc = CStr(ActiveWorkbook.Sheets("DATA_REFERENCE").Range("B3").Value)
+    CanCellLoc = CStr(ActiveWorkbook.Sheets("DATA_REFERENCE").Range("B4").Value)
+    PMUCellLoc = CStr(ActiveWorkbook.Sheets("DATA_REFERENCE").Range("B5").Value)
+    Keg30LCellAddress = CStr(ActiveWorkbook.Sheets("DATA_REFERENCE").Range("B6").Value)
+    Keg50L_58LCellAddress = CStr(ActiveWorkbook.Sheets("DATA_REFERENCE").Range("B7").Value)
+    
+    
+    ' check if workbook is open first (HANDLE errcode 1)
+    If Not IsWorkBookOpen(CALC_SHEETS_BOOK_NAME) Then
+        Load calcSheetsSelectForm
+        calcSheetsSelectForm.Show
+        
+        If Not IsWorkBookOpen(CALC_SHEETS_BOOK_NAME) Then
+            displayError (1)
+            End
+        Else
+            ActiveWorkbook.Sheets("DATA_REFERENCE").Range("B1").Value = CALC_SHEETS_BOOK_NAME
+        End If
+        
+    End If
+    
+    ' If there is a store number value in the "Next to build:" box, do that one
+    If InStr(Range("Q5").Value, "Do not") = 0 And Not IsEmpty(Range("Q5")) Then
+    
+        nextSheetName = CStr(Range("Q5").Value) ' get next whse number (sheet name)
+        nextSheet = Workbooks(CALC_SHEETS_BOOK_NAME).Sheets(nextSheetName).Index
+
+    ElseIf InStr(Range("Q5").Value, "Do not") > 0 And InStr(Range("Q4").Value, "Do not") = 0 Then
+    
+        If nextSheet > Workbooks(CALC_SHEETS_BOOK_NAME).Sheets.Count Then
+            finishRun
+        End If
+    Else
+        Do While Workbooks(CALC_SHEETS_BOOK_NAME).Sheets(nextSheet).Visible = xlSheetHidden _
+        Or Sheets(nextSheet).Visible = xlSheetVeryHidden
+            nextSheet = nextSheet + 1
+        Loop
+    End If
+    
+    Workbooks(CALC_SHEETS_BOOK_NAME).Worksheets(nextSheet).Activate
+    On Error GoTo 0
+    
+    calcSheetName = Workbooks(CALC_SHEETS_BOOK_NAME).ActiveSheet.Name
+    
+    If InStr(calcSheetName, "Sheet") = 0 Then
+        t = collectDataFromCalcSheet(curLoad, calcSheetName)
+    Else
+        ' If next sheet is "Sheet1" or some default sheet name, we're done;
+        finishRun ' notify user & reset
+    End If
+    
+    sheetChosen = Module4.pickSheetToBuildOn(curLoad)
+    
+    resetLoadSheets
+    
+    Workbooks(LOAD_SHEETS_BOOK_NAME).Worksheets(sheetChosen).Activate
+    
+    numSingleSpots = getNumSinglesOnLoadSheet(sheetChosen)
+
+    If numSingleSpots >= 4 Then ' specify order of placement for this sheet type
+    ' If at least 4 singles on sheet, place reg. cans BEFORE lcbo cans (high->low)
+        success = placeBottles(curLoad.numBottleSkids)
+        success = success + placeCans(curLoad.numCanSkids, curLoad.numBottleSkids)
+        success = success + placePMUandKegs(curLoad.numPMULayers, curLoad.num30LKegs, curLoad.num50L_58LKegs)
+        success = success + placeLCBO(curLoad.numLCBOCanSkids, curLoad.numBottleSkids)
+        success = success + placePMUandKegsPartials(curLoad.numPMULayers, curLoad.num30LKegs, curLoad.num50L_58LKegs)
+        
+    ElseIf numSingleSpots >= 1 And curLoad.numLCBOCanSkids > 0 And curLoad.numCanSkids >= (2 * numSingleSpots) + 1 Then
+        ' if the single zone can be filled with just bottles and cans (not LCBO) fill that first, then LCBO, then remaining reg cans
+        Dim numCansToFillSingleZone As Integer
+        
+        If curLoad.numBottleSkids >= (2 * numSingleSpots) + 1 Then
+            numCansToFillSingleZone = 0
+        ElseIf numSingleSpots > 1 Then
+            numCansToFillSingleZone = ((2 * numSingleSpots) + numSingleSpots - 2) - curLoad.numBottleSkids
+        Else
+            numCansToFillSingleZone = numSingleSpots
+        End If
+        
+        success = placeBottles(curLoad.numBottleSkids)
+        ' next, fill the remainder of the "single zone" with reg cans before LCBO (so no lcbo singles)
+        success = success + placeCans(numCansToFillSingleZone, curLoad.numBottleSkids)
+
+        ' Then place the remaining cans...
+        If numCansToFillSingleZone > 0 Then
+            remainingCans = curLoad.numCanSkids - numCansToFillSingleZone
+        Else
+            remainingCans = curLoad.numCanSkids
+        End If
+        
+        success = success + placeLCBO(curLoad.numLCBOCanSkids, curLoad.numBottleSkids)
+        success = success + placeCans(remainingCans, curLoad.numBottleSkids)
+        success = success + placePMUandKegs(curLoad.numPMULayers, curLoad.num30LKegs, curLoad.num50L_58LKegs)
+        success = success + placePMUandKegsPartials(curLoad.numPMULayers, curLoad.num30LKegs, curLoad.num50L_58LKegs)
+        
+    ElseIf numSingleSpots = 0 And curLoad.numLCBOCanSkids >= 12 Then
+        ' If there are no singles, and a lot of LCBO cans, place LCBO before bottles
+        success = placeLCBO(curLoad.numLCBOCanSkids, curLoad.numBottleSkids)
+        success = success + placeBottles(curLoad.numBottleSkids)
+        success = success + placeCans(curLoad.numCanSkids, curLoad.numBottleSkids)
+        success = success + placePMUandKegs(curLoad.numPMULayers, curLoad.num30LKegs, curLoad.num50L_58LKegs)
+        success = success + placePMUandKegsPartials(curLoad.numPMULayers, curLoad.num30LKegs, curLoad.num50L_58LKegs)
+    
+    Else
+    ' If less than 4 singles on sheet, place lcbo cans before cans (minimize front-axel load)
+        success = placeBottles(curLoad.numBottleSkids)
+        success = success + placeCans(curLoad.numCanSkids, curLoad.numBottleSkids)
+        success = success + placePMUandKegs(curLoad.numPMULayers, curLoad.num30LKegs, curLoad.num50L_58LKegs)
+        success = success + placeLCBO(curLoad.numLCBOCanSkids, curLoad.numBottleSkids)
+        success = success + placePMUandKegsPartials(curLoad.numPMULayers, curLoad.num30LKegs, curLoad.num50L_58LKegs)
+    
+    End If
+    
+    If success < 5 Then
+        t = displayError(3)
+    End If
+    
+      
+    t = prepareForNextSheet(calcSheetName, sheetChosen)
+    
+    Workbooks(LOAD_SHEETS_BOOK_NAME).Worksheets(sheetChosen).Activate ' go back to sheet we just built
+    
+    finalizeSheet ' Swaps all heavier skids to the right side, and adds CORNERED and WRAPPED where needed
+    
+    continue_resp = MsgBox("Successfully built sheet for WHSE:" & Chr(10) & calcSheetName & vbNewLine & vbNewLine & _
+    "Press the 'BUILD NEXT' button to erase this, and build sheet for WHSE:" & Chr(10) & CStr(Range("Q5").Value), vbOKOnly + vbInformation, _
+    "Success!")
+    
+End Sub
+
+
+Function finalizeSheet()
+    
+    curRowToSwap = 18
+    Do While curRowToSwap > 3
+        swapHeavySkidToRS (curRowToSwap)
+        curRowToSwap = curRowToSwap - 1
+    Loop
+    
+    addCorneredAndWrapped
+
+End Function
+
+' initializes values in the WhseLoad struct for current load
+Function collectDataFromCalcSheet(ByRef curLoad As WhseLoad, ByVal calcSheetName)
+
+    If ActiveWorkbook.Name <> CALC_SHEETS_BOOK_NAME Then
+        displayError (1)
+    End If
+    
+    curLoad.whseID = Workbooks(CALC_SHEETS_BOOK_NAME).ActiveSheet.Name
+
+    curLoad.numLCBOCanSkids = getNumLCBOCanSkids()
+    curLoad.numBottleSkids = getNumBottleSkids()
+    curLoad.numCanSkids = getNumCanSkids()
+    curLoad.numPMULayers = getNumPMUSkids()
+    curLoad.num30LKegs = getNum30LKegs()
+    curLoad.num50L_58LKegs = getNum50L_58LKegs()
+    
+
+End Function
+
+
+Function placeBottles(ByVal numBottleSkids As Integer)
+    If numBottleSkids = 0 Then
+        placeBottles = 1
+        Exit Function
+    End If
+    
+    ' first fill singles with bottles
+    numBottleSkids = numBottleSkids - fillSingles(numBottleSkids, "BOTTLES")
+    
+    success = fillNonSingles(numBottleSkids, "BOTTLES")
+    
+    placeBottles = success
+
+End Function
+
+Function placeLCBO(ByVal numLCBOSkids As Integer, ByVal numBottleSkids As Integer)
+    If numLCBOSkids <= 0 Then
+        placeLCBO = 1
+        Exit Function
+    End If
+
+    numLCBOSkids = numLCBOSkids - fillSingles(numLCBOSkids, "LCBO CANS")
+    
+    success = fillNonSingles(numLCBOSkids, "LCBO CANS")
+    
+    placeLCBO = success
+
+End Function
+
+Function placeCans(ByVal numCanSkids As Integer, ByVal numBottleSkids As Integer, Optional CustomName As String)
+    If numCanSkids <= 0 Then
+        placeCans = 1
+        Exit Function
+    End If
+    
+    If CustomName = "" Then
+        CustomName = "CANS"
+    End If
+
+    numCanSkids = numCanSkids - fillSingles(numCanSkids, CustomName)
+    
+    success = fillNonSingles(numCanSkids, CustomName)
+    
+    placeCans = success
+    
+End Function
+
+'   This function places the FULL skids of PMU, 30L kegs and 50/58L kegs, in that order.
+Function placePMUandKegs(ByVal numPMULayers As Integer, ByVal num30LKegs As Integer, ByVal num50L_58LKegs As Integer)
+
+    placePMUandKegs = 1
+
+    If numPMULayers = 0 And num30LKegs = 0 And num50L_58LKegs = 0 Then
+        Exit Function
+    End If
+
+    numFullPMUSkids = Application.WorksheetFunction.RoundDown(numPMULayers / 7, 0)
+    partialPMU = CInt(numPMULayers Mod 7)
+    
+    numFull30LSkids = Application.WorksheetFunction.RoundDown(num30LKegs / 32, 0)
+    partial30L = CInt(num30LKegs Mod 32)
+    
+    numFull50L_58LSkids = Application.WorksheetFunction.RoundDown(num50L_58LKegs / 16, 0)
+    partial50L_58L = CInt(num50L_58LKegs Mod 16)
+    
+    
+    ' Place all the full PMU
+     If numFullPMUSkids > 0 Then
+        ' first tries putting PMU in singles..
+        PMU_placed = fillSingles(CInt(numFullPMUSkids), "PMU")
+        
+        If PMU_placed < numFullPMUSkids Then
+            ' place the remaining skids in non-singles
+            successPMU = successPMU + fillNonSingles(CInt(numFullPMUSkids - PMU_placed), "PMU")
+            If successPMU <> 1 Then
+                placePMUandKegs = 0
+            End If
+        End If
+    End If
+    
+    ' Do the same for 30L keg skids...
+    If numFull30LSkids > 0 Then
+        keg30_placed = fillSingles(CInt(numFull30LSkids), "32-30L KEGS")
+        
+        If keg30_placed < numFull30LSkids Then
+        
+            success30L = fillNonSingles(CInt(numFull30LSkids - keg30Placed), "32-30L KEGS")
+            
+            If success30L <> 1 Then
+                placePMUandKegs = 0
+            End If
+        End If
+    End If
+    
+    ' And for 50/58L keg skids...
+    If numFull50L_58LSkids > 0 Then
+        keg50_58_placed = fillSingles(CInt(numFull50L_58LSkids), "16-50/58L KEGS")
+        
+        If keg50_58_placed < numFull50L_58LSkids Then
+            
+            success50L_58L = fillNonSingles(CInt(numFull50L_58LSkids - keg50_58_placed), "16-50/58L KEGS")
+            
+            If success50L_58L <> 1 Then
+                placePMUandKegs = 0
+            End If
+        End If
+    End If
+    
+    ' If there was an issue placing the full skids
+    If placePMUandKegs = 0 Then
+        displayError (3)
+        Exit Function
+    End If
+    
+    placePMUandKegs = 1
+    
+End Function
+
+
+'   This funciton is called after the FULL skids are placed, and placed the PARTIAL skids
+'   of PMU, 30L and 50/58L kegs. It attempts to stack the PMU partial with either of the
+'   keg partials, if it would be a legal stack.
+Function placePMUandKegsPartials(ByVal numPMULayers, ByVal total30L, ByVal total50L_58L)
+    placePMUandKegsPartials = 1
+    Dim partialInSingle
+
+    numFullPMUSkids = Application.WorksheetFunction.RoundDown(numPMULayers / 7, 0)
+    partialPMU = CInt(numPMULayers Mod 7)
+    
+    partial30L = total30L Mod 32
+    partial50L_58L = total50L_58L Mod 16
+    
+    If partialPMU = 0 And partial30L Mod 32 = 0 And partial50L_58L Mod 16 = 0 Then
+        Exit Function
+    End If
+    
+    ' If a stack is possible w PMU and one of the partial Keg skids...
+    If isLegalKegPMUStack(partialPMU, partial30L, "30") And partial30L > 0 And (numFullPMUSkids > 0 Or BYPASS_UNEVEN_STACK_RESTRICTION) Then
+        partialInSingle = fillSingles(1, partial30L & "-30L KEGS" & Chr(10) & "PMU-" & partialPMU & "L")
+        If partialInSingle = 0 Then
+            placePMUandKegsPartials = fillNonSingles(1, partial30L & "-30L KEGS" & Chr(10) & "PMU-" & partialPMU & "L")
+        End If
+        BYPASS_UNEVEN_STACK_RESTRICTION = False
+        partial30L = 0
+        partialPMU = 0
+        
+    ElseIf isLegalKegPMUStack(partialPMU, partial50L_58L, "50/58") And partial50L_58L > 0 And (numFullPMUSkids > 0 Or BYPASS_UNEVEN_STACK_RESTRICTION) Then
+        partialInSingle = fillSingles(1, partial50L_58L & "-50/58L KEGS" & Chr(10) & "PMU-" & partialPMU & "L")
+        If partialInSingle = 0 Then
+            placePMUandKegsPartials = fillNonSingles(1, partial50L_58L & "-50/58L KEGS" & Chr(10) & "PMU-" & partialPMU & "L")
+        End If
+        BYPASS_UNEVEN_STACK_RESTRICTION = False
+        partial50L_58L = 0
+        partialPMU = 0
+    End If
+    
+    partialInSingle = 0
+    
+    equivLayers_30L = Application.WorksheetFunction.RoundDown(partial30L / 4, 0)
+    equivLayers_50L_58L = Application.WorksheetFunction.RoundDown(partial50L_58L / 2, 0)
+    
+    ' In case PMU is taller than keg skids, make sure it is placed first.
+    If partialPMU > equivLayers_30L And equivLayers_30L > 0 _
+    And partialPMU > equivLayers_50L_58L And equivLayers_50L_58L > 0 _
+    And partialPMU > 0 Then
+        partialInSingle = fillSingles(1, "PMU-" & partialPMU & "L")
+        If partialInSingle < 1 Then
+            placePMUandKegsPartials = fillNonSingles(1, "PMU-" & partialPMU & "L")
+        End If
+        ' set to Zero so it doesn't place PMU partial after kegs too.
+        partialPMU = 0
+    End If
+    
+    
+    If partial30L > 0 Then
+        partialInSingle = fillSingles(1, partial30L & "-30L KEGS")
+        If partialInSingle < 1 Then
+            placePMUandKegsPartials = fillNonSingles(1, partial30L & "-30L KEGS")
+        End If
+    End If
+    partialInSingle = 0
+    
+    If partial50L_58L > 0 Then
+        partialInSingle = fillSingles(1, partial50L_58L & "-50/58L KEGS")
+        If partialInSingle < 1 Then
+            placePMUandKegsPartials = fillNonSingles(1, partial50L_58L & "-50/58L KEGS")
+        End If
+    End If
+    partialInSingle = 0
+    
+    If partialPMU > 0 Then
+        partialInSingle = fillSingles(1, "PMU-" & partialPMU & "L")
+        If partialInSingle < 1 Then
+            placePMUandKegsPartials = fillNonSingles(1, "PMU-" & partialPMU & "L")
+        End If
+    End If
+
+End Function
+
+'   This function fills the "single" slots at the front section of the trailer.
+'   Idealy, these are filled with bottles so they don't need to be cornered.
+'   ONLY PLACES ONE TYPE OF SKID AT A TIME indicated by skidTypeStr
+'   RET: (int) = number of skids successfully placed in single rows
+Function fillSingles(ByVal numSkids As Integer, skidTypeStr As String)
+    If numSkids = 0 Or InStr(ActiveSheet.Name, "30") > 0 Then
+        Exit Function
+    End If
+    
+    curCell = "D4"
+    
+    skidsPlaced = 0
+
+    Do While skidsPlaced < numSkids
+        
+        If Range(curCell).MergeArea.Cells.Count <> 3 Then ' If this is a 3-cell merge, it's a single!
+            fillSingles = skidsPlaced
+            Exit Function
+        ElseIf IsEmpty(Range(curCell)) Then
+        
+            Range(curCell).Value = skidTypeStr
+            
+            If Len(Range(curCell).Value) >= 11 And Len(Range(curCell).Value) < 17 Then
+                With Range(curCell)
+                    .Font.Name = "Calibri"
+                    .Font.Size = 14
+                    .WrapText = True
+                End With
+                
+            ElseIf Len(Range(curCell).Value) >= 17 Then
+                With Range(curCell)
+                    .Font.Name = "Calibri"
+                    .Font.Size = 12
+                    .WrapText = True
+                End With
+            End If
+            
+            On Error GoTo 0
+                        
+            skidsPlaced = skidsPlaced + 1
+        End If
+        nextRow = Range(curCell).Row + 2 ' go TWO rows down to next potential single
+        curCell = "D" & nextRow
+    Loop
+    
+    fillSingles = skidsPlaced
+End Function
+
+'   This function fills all 2-slots in the trailer, starting front the top (front) and going down in a
+'   left -> right pattern.
+'   ONLY PLACES ONE TYPE OF SKID AT A TIME indicated by skidTypeStr
+'   RET:    1 = Successfully placed all given skids in non-single rows, OR numSkids = 0 (none to place)
+'           -1 = Failed to place all skids; likely overflowed
+Function fillNonSingles(ByVal numSkids As Integer, skidTypeStr As String)
+    If numSkids = 0 Then
+        fillNonSingles = 1
+        Exit Function
+    End If
+    
+    curCell = "C4"
+    
+    skidsPlaced = 0
+    
+    Do While skidsPlaced < numSkids And Range(curCell).Row < 19
+    
+        If Range(curCell).MergeArea.Cells.Count = 2 And IsEmpty(Range(curCell)) Then ' 2 cells merged means this is a valid spot to place
+            
+            Range(curCell).Value = skidTypeStr
+            
+            If Len(Range(curCell).Value) >= 13 And Len(Range(curCell).Value) < 17 Then
+                Range(curCell).Font.Name = "Calibri"
+                Range(curCell).Font.Size = 14
+            ElseIf Len(Range(curCell).Value) >= 17 Then
+                Range(curCell).Font.Name = "Calibri"
+                Range(curCell).Font.Size = 12
+            End If
+            
+            skidsPlaced = skidsPlaced + 1
+        End If
+        
+        ' go to next free cell...
+        If Range(curCell).Column = 3 Then
+            curCell = "F" & Range(curCell).Row ' if placed in left side, check right side next loop
+        Else
+            curCell = "C" & Range(curCell).Row + 1 ' if placed on right, check left side of next row next loop
+        End If
+    Loop
+    
+    If skidsPlaced = numSkids Then
+        fillNonSingles = 1
+    Else
+        resp = MsgBox("Not all " & skidTypeStr & " skids could fit on the trailer! This may be because there is an uneven PMU partial that cannot be stacked." & vbNewLine & vbNewLine & _
+        "WOULD YOU LIKE TO BYPASS THE UNEVEN STACK RESTRICTION AND TRY AGAIN?", vbYesNo, "Load won't fit!")
+    
+        If resp = vbYes Then
+            BYPASS_UNEVEN_STACK_RESTRICTION = True
+            Range("Q5").Value = Workbooks(CALC_SHEETS_BOOK_NAME).Sheets(nextSheet).Name
+            BuildSheet_WHSE
+            End
+        End If
+        fillNonSingles = -1
+    End If
+
+End Function
+
+'   checks if a stack between a PMU partial and keg partial is of legal height (<=8L)
+'   RET:    T/F (bool)
+Function isLegalKegPMUStack(ByVal partialPMULayers, ByVal partialKegs, kegType) As Boolean
+    
+    isLegalKegPMUStack = False
+    
+    If partialPMULayers = 0 Or partialKegs = 0 Then
+        Exit Function
+    End If
+    ' These are the equivalent layer counts for the skid partial
+    
+    If (kegType = "30" And partialKegs > 16) Or (kegType = "50/58" And partialKegs > 8) Then
+        Exit Function
+    Else ' must be 1 pallet or less of kegs to stack
+        equivLayers_30L = partialKegs / 4
+        equivLayers_50_58L = partialKegs / 2
+        
+        If (partialPMULayers + equivLayers_30L <= 8 And kegType = "30") Or (partialPMULayers + equivLayers_50_58L <= 8 And kegType = "50/58") Then
+            isLegalKegPMUStack = True
+        End If
+    End If
+
+End Function
+
+
+' This fn gives the first empty cell in placement order AFTER the singles section of the sheet.
+Function getNextEmptyCell() As String
+
+    LS_highestRow = 18
+    RS_highestRow = 18
+    
+    Do While IsEmpty(Range("C" & LS_highestRow)) And Range("C" & LS_highestRow).MergeArea.Cells.Count = 2
+        LS_highestRow = LS_highestRow - 1
+    Loop
+    
+    Do While IsEmpty(Range("F" & RS_highestRow)) And Range("F" & RS_highestRow).MergeArea.Cells.Count = 2
+        RS_highestRow = RS_highestRow - 1
+    Loop
+    
+    If LS_highestRow < RS_highestRow Then
+        getNextEmptyCell = "C" & LS_highestRow + 1
+    Else
+        getNextEmptyCell = "F" & RS_highestRow + 1
+    End If
+
+End Function
+
+' This function makes sure the last skid is on the right side, and if not shifts it over
+Function shiftLastSkidToRS()
+
+    firstMT = getNextEmptyCell
+    
+    If Range(firstMT).Column = 6 Then
+        lastRow = Range(firstMT).Row
+        
+        If Not IsEmpty(Range("C" & lastRow)) Then
+            Range(firstMT).Value = Range("C" & lastRow).Value
+            Range(firstMT).Font.Size = Range("C" & lastRow).Font.Size
+            Range("C" & lastRow).Font.Size = 16
+            
+            Range("C" & lastRow).Value = ""
+        End If
+    End If
+    
+End Function
+
+' Given a row number, this function compares the relative weight of the pallets
+' in the left and right column, and swaps the heavier pallet to the right side if
+' it isn't there already
+Function swapHeavySkidToRS(rowNum)
+
+    If Not IsEmpty(Range("C" & rowNum)) And Not IsEmpty(Range("F" & rowNum)) _
+    And isFullSkid("C" & rowNum) And Not isFullSkid("F" & rowNum) Then
+    
+        swapCellsInRow (rowNum)
+        
+    ElseIf leftSideIsHeavier(rowNum) Then
+        ' Greatest -> least weight: CANS, PMU, KEGS, BOTTLES, LCBO
+        swapCellsInRow (rowNum)
+    
+    End If
+        
+
+End Function
+
+
+Function leftSideIsHeavier(rowNum)
+
+    If Range("C" & rowNum).Value = Range("F" & rowNum).Value Or rowNum <= 0 Then
+        leftSideIsHeavier = False
+        Exit Function
+    Else
+        leftWeightRank = 0
+        rightWeightRank = 0
+        
+        curCol = "C"
+        Do While curCol <> ""
+        
+            curColWeightRank = 0
+            
+            cellVal = Range(curCol & rowNum).Value
+    
+            If InStr(cellVal, "CANS") > 0 And InStr(cellVal, "LCBO") <= 0 Then
+                curColWeightRank = 5
+            ElseIf InStr(cellVal, "PMU") > 0 Then
+                curColWeightRank = 4
+            ElseIf InStr(cellVal, "KEG") > 0 Then
+                curColWeightRank = 3
+            ElseIf InStr(cellVal, "BOTTLES") > 0 Then
+                curColWeightRank = 2
+            ElseIf InStr(cellVal, "LCBO") > 0 Then
+                curColWeightRank = 1
+            Else
+                curColWeightRank = 0
+            End If
+            
+            If curCol = "C" Then
+                leftWeightRank = curColWeightRank
+                curCol = "F"
+            Else
+                rightWeightRank = curColWeightRank
+                curCol = ""
+            End If
+        Loop
+        
+        If leftWeightRank - rightWeightRank > 0 Then
+            leftSideIsHeavier = True
+        Else
+            leftSideIsHeavier = False
+        End If
+    End If
+End Function
+
+Function swapCellsInRow(rowNum)
+    
+    oldLeftVal = Range("C" & rowNum).Value
+    oldLeftFontSize = Range("C" & rowNum).Font.Size
+    
+    Range("C" & rowNum).Value = Range("F" & rowNum).Value
+    Range("C" & rowNum).Font.Size = Range("F" & rowNum).Font.Size
+    
+    Range("F" & rowNum).Value = oldLeftVal
+    Range("F" & rowNum).Font.Size = oldLeftFontSize
+
+
+End Function
+
+Function isFullSkid(cellAddress As String) As Boolean
+
+    If IsEmpty(Range(cellAddress).Value) Then
+        isFullSkid = False
+        Exit Function
+        
+    ElseIf InStr(Range(cellAddress).Value, "16-50/58L") > 0 Or InStr(Range(cellAddress).Value, "32-30L") > 0 Or _
+    Range(cellAddress).Value = "CANS" Or Range(cellAddress).Value = "LCBO CANS" Or Range(cellAddress).Value = "BOTTLES" Or _
+    Range(cellAddress).Value = "PMU" Then
+    
+        isFullSkid = True
+        Exit Function
+    Else
+    
+        Dim partialPMU
+        Dim partialKegs
+        Dim equivKegLayers
+        
+        If InStr(Range(cellAddress).Value, "PMU") > 0 Then
+            partialPMU = getNumPMULayersFromCell(cellAddress)
+        End If
+        
+        'If this is a 30L/PMU stack
+        If InStr(Range(cellAddress).Value, "-30L") > 0 Then
+        
+            partialKegs = getNumKegsFromCell(cellAddress)
+            equivKegLayers = Application.WorksheetFunction.RoundDown(partialKegs / 4, 0)
+        
+        ' If this is a 50/58L/PMU stack
+        ElseIf InStr(Range(cellAddress).Value, "-50/58L") > 0 Then
+        
+            partialKegs = getNumKegsFromCell(cellAddress)
+            equivKegLayers = Application.WorksheetFunction.RoundDown(partialKegs / 2, 0)
+            
+        End If
+
+        If equivKegLayers + partialPMU >= 7 Then
+            isFullSkid = True
+        Else
+            isFullSkid = False
+        End If
+        Exit Function
+        
+    End If
+
+End Function
+
+Function getNumKegsFromCell(cellAddress) As Integer
+
+    cellStr = Range(cellAddress).Value
+    
+    If InStr(cellStr, "30L") = 0 And InStr(cellStr, "50/58L") = 0 Then
+        getNumKegsFromCell = 0
+        Exit Function
+    Else
+        splitDash = Split(Range(cellAddress).Value, "-")
+        
+        If IsNumeric(splitDash(0)) Then
+            partial30L = CInt(splitDash(0))
+            getNumKegsFromCell = partial30L
+        End If
+        
+    End If
+
+End Function
+
+Function getNumPMULayersFromCell(cellAddress) As Integer
+
+    cellStr = Range(cellAddress).Value
+    
+    If InStr(cellStr, "PMU") = 0 Then
+        getNumPMULayersFromCell = 0
+        Exit Function
+    Else
+    
+        splitDash = Split(Range(cellAddress).Value, "-")
+        ' example array: splitDash = [0]"4" [1]"30L Kegs vbNewLine PMU" [2]"3L"
+    
+        If UBound(splitDash) - LBound(splitDash) + 1 = 3 Then ' follows form shown above
+            splitL = Split(splitDash(2), "L")
+            
+            If IsNumeric(splitL(0)) Then
+                partialPMU = CInt(splitL(0))
+                getNumPMULayersFromCell = partialPMU
+            End If
+        ElseIf UBound(splitDash) - LBound(splitDash) + 1 = 2 Then
+            splitL = Split(splitDash(1), "L")
+            If IsNumeric(splitL(0)) Then
+                partialPMU = CInt(splitL(0))
+                getNumPMULayersFromCell = partialPMU
+            End If
+        End If
+    End If
+
+End Function
+
+
+'-------------------------------------------------------------------------------
+' The following functions directly get keg / partial counts from the calc. sheet.
+' THE CELL LOCATIONS WHICH CONTAIN RELEVANT DATA CAN BE EDITTED ON THE "DATA_REFERENCE" SHEET
+' ===============================================================================================
+' -----------------------------------------------------------------------------------------------
+
+Function getNumLCBOCanSkids() As Integer
+
+    If Not IsEmpty(Range(LCBOCanCellLoc).Value) And Not IsNumeric(Range(LCBOCanCellLoc).Value) Then
+        displayError (2)
+        End
+    End If
+
+    If Not IsEmpty(Range(LCBOCanCellLoc)) > 0 Then
+        getNumLCBOCanSkids = CInt(Range(LCBOCanCellLoc).Value) ' num bottles is in B8
+        On Error GoTo 0
+    Else
+        getNumLCBOCanSkids = 0
+    End If
+
+End Function
+
+
+Function getNumBottleSkids() As Integer
+    
+    If Not IsEmpty(Range(BottleCellLoc).Value) And Not IsNumeric(Range(BottleCellLoc).Value) Then
+        displayError (2)
+        End
+    End If
+
+    If Not IsEmpty(Range(BottleCellLoc)) > 0 Then
+        getNumBottleSkids = CInt(Range(BottleCellLoc).Value) ' num bottles is in B8
+        On Error GoTo 0
+    Else
+        getNumBottleSkids = 0
+    End If
+
+
+End Function
+
+Function getNumCanSkids() As Integer
+    
+    If Not IsEmpty(Range(CanCellLoc).Value) And Not IsNumeric(Range(CanCellLoc).Value) Then
+        displayError (2)
+        End
+    End If
+
+    If Not IsEmpty(Range(CanCellLoc)) Then
+        getNumCanSkids = CInt(Range(CanCellLoc).Value) ' num bottles is in B8
+        On Error GoTo 0
+    Else
+        getNumCanSkids = 0
+    End If
+
+
+End Function
+
+Function getNumPMUSkids() As Integer
+
+    If Not IsEmpty(Range(PMUCellLoc)) And Not IsNumeric(Range(PMUCellLoc).Value) Then
+        displayError (2)
+        End
+    End If
+
+    If Not IsEmpty(Range(PMUCellLoc)) Then
+        getNumPMUSkids = CInt(Application.WorksheetFunction.RoundUp(Range(PMUCellLoc).Value, 0)) ' num bottles is in B8
+        On Error GoTo 0
+    Else
+        getNumPMUSkids = 0
+    End If
+    
+
+End Function
+
+Function getNum30LKegs() As Integer
+
+    If Not IsEmpty(Range(Keg30LCellAddress).Value) And Not IsNumeric(Range(Keg30LCellAddress).Value) Then
+        displayError (2)
+        End
+    End If
+
+    If Not IsEmpty(Range(Keg30LCellAddress)) Then
+        getNum30LKegs = CInt(Range(Keg30LCellAddress).Value)
+        On Error GoTo 0
+    Else
+        getNum30LKegs = 0
+    End If
+
+
+End Function
+
+
+Function getNum50L_58LKegs() As Integer
+
+    If Not IsEmpty(Range(Keg50L_58LCellAddress).Value) And _
+    Not IsNumeric(Range(Keg50L_58LCellAddress).Value) Then
+        displayError (2)
+        End
+    End If
+
+    If Not IsEmpty(Range(Keg50L_58LCellAddress)) Then
+        getNum50L_58LKegs = CInt(Range(Keg50L_58LCellAddress).Value)
+        On Error GoTo 0
+    Else
+        getNum50L_58LKegs = 0
+    End If
+
+End Function
+
+' -----------------------------------------------------------------------------------------------
+' END OF GETTERS
+' ===============================================================================================
+' -----------------------------------------------------------------------------------------------
+
+
+' gets error code, displays relevant error
+Function displayError(errorCode As Integer)
+
+    Select Case errorCode
+        Case 1
+            E = MsgBox("Please open the Calculation Sheet workbook before running!", vbCritical + vbOKOnly, "ERROR: No Calc Sheet Open!")
+        Case 2
+            E = MsgBox("The Calculation Sheet has a non-numeric value where a count should be!" & _
+            "Please make sure the counts are all numbers before trying again.", vbCritical + vbOKOnly, "ERROR: No Calc Sheet Open!")
+            Range("B1").Clear ' deletes the Calc sheet workbook name that has been saved on DATA_REFERENCE page
+        Case 3
+            E = MsgBox("ERROR: Something went wrong while populating the sheet!", vbCritical + vbOKOnly, "ERROR: Failed to fill sheet!")
+        Case 4
+            E = MsgBox("ERROR: There was an issue preparing the sheets for the next load!", vbCritical + vbOKOnly, "ERROR: Failed to prep sheets!")
+        Case Else
+            E = MsgBox("ERROR: An unknown error has occured!", vbCritical + vbOKOnly, "ERROR: ???")
+    End Select
+    
+End Function
+
+' checks if a workbook (Calc sheets) is open
+'   RET:   (bool)
+Function IsWorkBookOpen(Name As String) As Boolean
+    Dim xWb As Workbook
+    On Error Resume Next
+    Set xWb = Application.Workbooks.Item(Name)
+    IsWorkBookOpen = (Not xWb Is Nothing)
+End Function
+
+' Goes to the next VISIBLE calc sheet, and sets this as the next-to-build
+Function prepareForNextSheet(curSheetName, sheetBuiltOnName)
+    prepareForNextSheet = False
+
+    Workbooks(CALC_SHEETS_BOOK_NAME).Worksheets(curSheetName).Activate
+    
+    nextSheetInd = ActiveSheet.Index + 1
+    ' If the next sheet is hidden, keep looping to next until an un-hidden sheet is found
+    Do While Sheets(nextSheetInd).Visible = xlSheetHidden Or Sheets(nextSheetInd).Visible = xlSheetVeryHidden
+        nextSheetInd = nextSheetInd + 1
+    Loop
+
+    If nextSheetInd <= Application.Sheets.Count Then
+        t = prepareLoadSheetsForNext(nextSheetInd, curSheetName, sheetBuiltOnName)
+    Else
+        finishRun
+    End If
+
+    Workbooks(CALC_SHEETS_BOOK_NAME).Worksheets(curSheetName).Activate
+    
+End Function
+
+
+' Loops through each load sheet template and puts CURRENT and NEXT sheet name in Q4 and Q5
+' Also changes BUILD button to BUILD NEXT button.
+Function prepareLoadSheetsForNext(nextSheetInd, curSheetName, sheetBuiltOnName)
+
+    If nextSheetInd = 0 Then
+        displayError (4)
+        End
+    End If
+    
+    nextSheetName = Workbooks(CALC_SHEETS_BOOK_NAME).Worksheets(nextSheetInd).Name
+
+    curSheetToUpdateInd = 1
+
+    Do While curSheetToUpdateInd < Workbooks(LOAD_SHEETS_BOOK_NAME).Worksheets.Count
+        
+        Workbooks(LOAD_SHEETS_BOOK_NAME).Worksheets(curSheetToUpdateInd).Activate
+        
+        ' If tab has no color -> buildable worksheet
+        ' DATA_REFERENCE and Custom Load sheets should have a tab color!
+        If ActiveSheet.Tab.Color = False Then
+        
+            With Range("Q5")
+                .Value = nextSheetName
+                .Font.Size = 18
+            End With
+            
+            With Range("Q4")
+                .Value = curSheetName & " (" & sheetBuiltOnName & ")"
+                .Font.Size = 18
+            End With
+
+            ActiveSheet.Buttons("Button 1").Caption = "BUILD NEXT"
+            curSheetToUpdateInd = curSheetToUpdateInd + 1
+        Else
+            Exit Do
+        End If
+        
+    Loop
+
+End Function
+
+' Loops through all load sheet templates and clears them to default state
+Function resetLoadSheets()
+
+    curSheetToResetInd = 1
+    
+    If LOAD_SHEETS_BOOK_NAME = "" Then
+        LOAD_SHEETS_BOOK_NAME = ActiveWorkbook.Name
+    End If
+
+    Do While curSheetToResetInd < Workbooks(LOAD_SHEETS_BOOK_NAME).Worksheets.Count
+        
+        Workbooks(LOAD_SHEETS_BOOK_NAME).Worksheets(curSheetToResetInd).Activate
+        
+        ' If tab has no color -> buildable worksheet
+        If ActiveSheet.Tab.Color = False Then
+        
+            With Range("Q4:Q5")
+                .Value = "[Do not edit this cell!]"
+                .Font.Name = "Calibri"
+                .Font.Size = 14
+            End With
+            
+            If Not rangeIsEmpty("C4", "G18") Then ' only if it has content...
+                clearTrailerSection (curSheetToResetInd)
+                formatTrailerSection (curSheetToResetInd)
+            End If
+            
+            If Not rangeIsEmpty("M4", "N6") Then
+                With Range("M4:N6")
+                    .Value = ""
+                    .Font.Name = "Calibri"
+                    .Font.Size = 16
+                End With
+            End If
+                        
+            ActiveSheet.Buttons("Button 1").Caption = "BUILD"
+            curSheetToResetInd = curSheetToResetInd + 1
+        
+        Else ' If this is not a valid build sheet... (tab is colored)
+            Worksheets(1).Activate
+            Exit Do
+        End If
+        
+    Loop
+End Function
+
+' Simply clears the trialer section of a load sheet
+Function clearTrailerSection(sheetIndex)
+
+    With Workbooks(LOAD_SHEETS_BOOK_NAME).Worksheets(sheetIndex).Range("C4:G18")
+        .Value = ""
+        .Font.Name = "Calibri"
+        .Font.Size = 16
+        .Borders.LineStyle = xlContinuous
+    End With
+    
+End Function
+
+Function formatTrailerSection(sheetIndex)
+
+    'Assures correct book is being changed
+    Workbooks(LOAD_SHEETS_BOOK_NAME).Worksheets(sheetIndex).Activate
+    
+    numSingles = getNumSinglesOnLoadSheet(sheetIndex)
+    numSingleRowsFinished = 0
+    curRow = 4
+    
+    Do While numSingleRowsFinished < numSingles
+        
+        ' Size and format left BLUE spot (empty)
+        With Range("C" & curRow)
+            .UnMerge
+            .Interior.ColorIndex = 37 ' Maybe not 37 ??
+        End With
+        
+        ' Size and format center cell (D,E,F Merged cell for single)
+        With Range("D" & curRow, "F" & curRow)
+            .Merge
+            .Interior.ColorIndex = 2
+            .BorderAround
+        End With
+        
+        ' Size and format right BLUE spot (empty)
+        With Range("G" & curRow)
+            .UnMerge
+            .Interior.ColorIndex = 37
+        End With
+
+        ' WHEN NEW SHEETS ARE INTRODUCED THIS MIGHT CREATE AN ISSUE
+        ' BC DONT KNOW IF NEXT IS ANOTHER SINGLE
+        success = formatNormalRow(sheetIndex, curRow + 1)
+        
+        curRow = curRow + 2 ' iterate to (potentially) next single row
+        
+        numSingleRowsFinished = numSingleRowsFinished + 1
+        
+    Loop
+    
+  ' TODO::: Add another loop to go through all the normal rows AFTER singles section
+    Do While curRow < 19
+        success = formatNormalRow(sheetIndex, curRow)
+        curRow = curRow + 1
+    Loop
+    
+End Function
+
+' This simple function reverts a given trailer row to the normal 2-wide format
+Function formatNormalRow(sheetIndex, rowNum)
+
+    Workbooks(LOAD_SHEETS_BOOK_NAME).Worksheets(sheetIndex).Activate
+
+    Range("D" & rowNum, "F" & rowNum).UnMerge
+    
+    With Range("C" & rowNum, "D" & rowNum)
+        .Merge
+        .Interior.ColorIndex = 0
+        .BorderAround
+    End With
+    
+    'Sets middle divider to a dark grey color (5855577)
+    With Range("E" & rowNum)
+        .Interior.Color = 5855577
+        .BorderAround
+    End With
+    
+    With Range("F" & rowNum, "G" & rowNum)
+        .Merge
+        .Interior.ColorIndex = 0
+        .BorderAround
+    End With
+
+End Function
+
+' rangeIsEmpty is a simple function used to check whether a rectangular range of cells is empty (duh)
+    ' ARGS:     fromCell (string) - The cell in the top left corner of the range
+    '               toCell (string) - The cell in the bottom right corner of the range
+    
+    ' RET:      (bool) - True if emtpy, else False
+Function rangeIsEmpty(fromCell, toCell)
+
+    If WorksheetFunction.CountA(Range(fromCell & ":" & toCell)) = 0 Then
+        rangeIsEmpty = True
+    Else
+        rangeIsEmpty = False
+    End If
+End Function
+
+' Puts CORNERED and WRAPPED wherever necessary on the completed load sheet.
+Function addCorneredAndWrapped()
+
+    Set trlRange = Range("C4:G18")
+    
+    ' loop through each cell in the trailer section
+    For Each cell In trlRange
+        
+        If cell.MergeArea.Cells.Count = 1 And IsEmpty(cell) Then ' if this a blue cell next to a single...
+            
+            singleCell = "D" & cell.Row
+            ' If single needs to be cornered (cans / LCBO) then
+            If (InStr(Range(singleCell).Value, "CANS") > 0 Or InStr(Range(singleCell).Value, "PMU") > 0 _
+            Or InStr(Range(singleCell).Value, "355") > 0 Or InStr(Range(singleCell).Value, "473") > 0) _
+            And InStr(Range(singleCell).Value, "KEGS") = 0 Then
+                
+                With Range("C" & cell.Row)
+                    .Value = "CORNERED"
+                    .Font.Name = "Calibri"
+                    .Font.Size = 12
+                End With
+                
+                With Range("G" & cell.Row)
+                    .Value = "CORNERED"
+                    .Font.Name = "Calibri"
+                    .Font.Size = 12
+                End With
+            End If
+        
+        ' If last skid makes one col longer, corner that last skid if its cans / pmu
+        ElseIf cell.MergeArea.Cells.Count = 2 Then
+            ' Use needsCornerOrWrap function to determine cells that need it
+            If needsCornerOrWrap(cell.Address) And InStr(cell.Value, "KEG") > 0 Then
+                With cell
+                    .Value = cell.Value & Chr(10) & "WRAPPED"
+                    .Font.Name = "Calibri"
+                    .Font.Size = 12
+                End With
+            ElseIf needsCornerOrWrap(cell.Address) Then
+                With cell
+                    .Value = cell.Value & Chr(10) & "CORNERED"
+                    .Font.Name = "Calibri"
+                    .Font.Size = 14
+                End With
+            End If
+        End If
+    Next cell
+    
+End Function
+
+' Given a cell, checks surroundings to see if it needs to be wrapped / cornered
+'   ARG: cellAddress
+'   RET: True (needs protection), or False
+Function needsCornerOrWrap(cellAddress)
+
+    needsCornerOrWrap = False
+
+    If Range(cellAddress).Column >= 6 Then
+        cellBeside = "C" & Range(cellAddress).Row
+        cellBehind = "F" & Range(cellAddress).Row - 1
+    Else
+        cellBeside = "F" & Range(cellAddress).Row
+        cellBehind = "C" & Range(cellAddress).Row - 1
+    End If
+    
+    ' check cells BEHIND and BESIDE to see if cornering is needed
+    If (IsEmpty(Range(cellBeside)) _
+    Or InStr(Range(cellBeside).Value, "LCBO") > 0 Or InStr(Range(cellBehind).Value, "LCBO") > 0 _
+    Or InStr(Range(cellBeside).Value, "PMU") > 0 Or InStr(Range(cellBehind).Value, "PMU") > 0) Then
+    
+        If (InStr(Range(cellAddress).Value, "CANS") > 0 Or InStr(Range(cellAddress).Value, "355") > 0 Or InStr(Range(cellAddress).Value, "473") > 0) _
+        And InStr(Range(cellAddress).Value, "LCBO") = 0 Then
+            needsCornerOrWrap = True 'This is a regular CANS cell
+        ElseIf InStr(Range(cellAddress).Value, "KEG") > 0 And InStr(Range(cellAddress).Value, "PMU") = 0 Then
+            needsCornerOrWrap = True 'This is only KEGS
+        End If
+    End If
+    
+End Function
+
+
+' simply gets the number of single cells for a given sheet ( by the sheet name :/ )
+Function getNumSinglesOnLoadSheet(sheetName) As Integer
+
+    If IsNumeric(sheetName) = True Then
+        sheetName = Worksheets(sheetName).Name
+    End If
+
+    ' split the number of singles from the LS sheet name
+    sheetNameSplit = Split(sheetName, " ")
+    numSingles = sheetNameSplit(1)
+    
+    If IsNumeric(numSingles) Then
+        getNumSinglesOnLoadSheet = CInt(numSingles)
+    Else
+        getNumSinglesOnLoadSheet = 0
+    End If
+            
+End Function
+
+
+' Displays "all done" message, resets all load sheets and ends runtime
+Function finishRun()
+    t = MsgBox("All sheets complete! The Load Sheet workbook will now be reset.", vbOKOnly, "All Sheets Done!")
+    resetLoadSheets
+    End
+End Function
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
